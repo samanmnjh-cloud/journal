@@ -803,7 +803,7 @@ const C = {
   ink2: '#3F4552',
   ink3: '#6B7280',
 };
-const APP_VERSION = 'v41';
+const APP_VERSION = 'v43';
 const APP_BUILT = '25 Oct 2026';
 
 /* Polymarket sets everything in Inter. Numbers stay aligned through
@@ -976,6 +976,7 @@ const K_IGNORED = 'pm_ignored';
 const K_SETTINGS = 'pm_settings';
 const K_WALLETVAL = 'pm_walletvalue';
 const K_STATS = 'pm_stats';
+const K_ALLOC = 'pm_alloc';
 
 /* ------------------------------------------------------------- helpers */
 const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d);
@@ -1680,6 +1681,7 @@ function Modal({ title, subtitle, children, onClose, width = 480, dismissOnBackd
       onClick={(e) => {
         if (dismissOnBackdrop && onClose && e.target === e.currentTarget) onClose();
       }}
+      data-modal
       style={{
         position: 'fixed', inset: 0, background: 'rgba(11,13,18,0.32)', zIndex: 100,
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px 40px', overflowY: 'auto',
@@ -2360,7 +2362,8 @@ function MarketDetail({ trade, settings }) {
   );
 }
 
-function Dashboard({ trades, book, settings, statsHistory, onOpenSettings, onEdit, onEditProb, onDelete, onSort }) {
+function Dashboard({ trades, book, settings, statsHistory, onOpenSettings, onEdit, onEditProb,
+  onDelete, onSort, onSettings }) {
   const [expanded, setExpanded] = useState(null);
   const [statView, setStatView] = useState(null);
   const toggle = (k) => setExpanded((c) => (c === k ? null : k));
@@ -2436,6 +2439,11 @@ function Dashboard({ trades, book, settings, statsHistory, onOpenSettings, onEdi
 
       {open.length > 0 && <SizingCard book={book} settings={settings} onOpenSettings={onOpenSettings} />}
 
+      {open.length > 0 && (
+        <AllocationBox trades={trades} book={book} settings={settings}
+          onEdit={onEdit} onEditProb={onEditProb} onSettings={onSettings} />
+      )}
+
       <Card pad={0}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid ' + C.border, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <h2 style={{ fontSize: 12, letterSpacing: 1.2, textTransform: 'uppercase', color: C.ink3, margin: 0, fontWeight: 700 }}>
@@ -2487,7 +2495,8 @@ function Dashboard({ trades, book, settings, statsHistory, onOpenSettings, onEdi
               const value = openValue(t);
               return (
                 <div key={t.key} style={{ borderTop: i === 0 ? 'none' : '1px solid ' + C.border }}>
-                <div onClick={(e) => { if (!e.target.closest('[data-stop]')) toggle(t.key); }}
+                <div data-open-row={t.key}
+                  onClick={(e) => { if (!e.target.closest('[data-stop]')) toggle(t.key); }}
                   style={{
                   display: 'grid', gridTemplateColumns: 'auto minmax(0,1fr) 116px 252px', gap: 12,
                   padding: '13px 16px', alignItems: 'center', cursor: 'pointer',
@@ -2597,7 +2606,8 @@ function Dashboard({ trades, book, settings, statsHistory, onOpenSettings, onEdi
           <div>
             {recent.map((t, i) => (
               <div key={t.key} style={{ borderTop: i === 0 ? 'none' : '1px solid ' + C.border }}>
-              <div onClick={(e) => { if (!e.target.closest('[data-stop]')) toggle(t.key); }} style={{
+              <div data-closed-row={t.key}
+                onClick={(e) => { if (!e.target.closest('[data-stop]')) toggle(t.key); }} style={{
                 display: 'grid', gridTemplateColumns: 'auto minmax(0,1fr) auto', gap: 12,
                 padding: '13px 16px', alignItems: 'center', cursor: 'pointer',
               }}>
@@ -2820,6 +2830,348 @@ function FamilyChip({ sizing, book, trades }) {
       borderRadius: 4, padding: '1px 5px',
     }}>{manual ? 'GROUP OF ' + sizing.familySize : sizing.familySize + ' DATES'}
       {fam ? ' · ' + fmtDollar0(fam.suggested) : ''}</span>
+  );
+}
+
+/* ======================================================= ALLOCATION BOX
+
+   What you hold against what the engine suggests, one bullet bar a market:
+   the bar is the money in it, the notch is the target. Markets that share a
+   position are one row that opens into its members, because a group holds one
+   position between it and a list that showed them apart would be lying about
+   how much of the book they occupy.
+   ===================================================================== */
+const ALLOC_SORTS = [
+  { id: 'held', label: 'What I hold', of: (x) => num(x.actual) },
+  { id: 'sug', label: "What's suggested", of: (x) => num(x.suggested) },
+  { id: 'diff', label: 'Biggest difference', of: (x) => Math.abs(num(x.suggested) - num(x.actual)) },
+];
+
+/* Inside a group a member only has to carry what makes it different from its
+   siblings — "by March 31, 2027", not the whole question again. */
+function memberName(title, label, siblings) {
+  const t = String(title || '').replace(/\?+$/, '').trim();
+  if (siblings < 2) return t;
+  if (t.toLowerCase().indexOf(String(label).toLowerCase()) !== 0) return t;
+  const rest = t.slice(String(label).length).replace(/^[\s,·–-]+/, '').trim();
+  return rest || t;
+}
+
+function allocationGroups(trades, book) {
+  const by = {};
+  (trades || []).forEach((t) => {
+    if (t.status !== 'open') return;
+    const z = book && book.results && book.results[t.key];
+    if (!z) return;
+    const id = z.family || t.key;
+    if (!by[id]) by[id] = { id, members: [], actual: 0, suggested: 0 };
+    by[id].members.push({ trade: t, z });
+    by[id].actual += num(z.actual);
+    by[id].suggested += num(z.suggested);
+  });
+  return Object.keys(by).map((id) => {
+    const g = by[id];
+    const byTitle = g.members.slice().sort((a, b) => a.trade.title.length - b.trade.title.length);
+    const label = g.members.length > 1
+      ? Engine.trimDate(byTitle[0].trade.title)
+      : String(byTitle[0].trade.title || '').replace(/\?+$/, '');
+    /* The group wears the picture of whatever it holds most of. */
+    const lead = g.members.slice().sort((a, b) => num(b.z.actual) - num(a.z.actual))[0];
+    const cs = g.members.map((m) => num(m.trade.myProbability)).sort((a, b) => a - b);
+    return Object.assign({}, g, {
+      label, lead: lead.trade, convLo: cs[0], convHi: cs[cs.length - 1],
+      manual: !!(g.members[0].z && g.members[0].z.familyManual),
+      members: g.members.map((m) => Object.assign({}, m,
+        { sub: memberName(m.trade.title, label, g.members.length) })),
+    });
+  });
+}
+
+/* Always the same footprint, so every bar on every row starts at one place. */
+function AllocIcon({ trade, size }) {
+  const src = trade && trade.icon;
+  const [bad, setBad] = useState(false);
+  const box = {
+    width: size, height: size, borderRadius: 8, flexShrink: 0,
+    border: '1px solid ' + C.border, background: C.cardAlt, objectFit: 'cover',
+  };
+  if (!src || bad) {
+    return <div style={Object.assign({}, box, { display: 'grid', placeItems: 'center',
+      color: C.gray, fontFamily: MONO, fontSize: Math.round(size * 0.34), fontWeight: 700 })}>
+      {String((trade && trade.outcome) || '?').toUpperCase().slice(0, 1)}
+    </div>;
+  }
+  return <img src={src} alt="" width={size} height={size} onError={() => setBad(true)} style={box} />;
+}
+
+function AllocBar({ actual, suggested, max, height, settings }) {
+  const on = Engine.onTarget(actual, suggested, settings);
+  const c = on ? '#9AA1AC' : (num(actual) > num(suggested) ? C.red : C.green);
+  const w = max > 0 ? Math.min(100, num(actual) / max * 100) : 0;
+  const t = max > 0 ? Math.min(100, num(suggested) / max * 100) : 0;
+  return (
+    <div style={{ position: 'relative', height, background: C.cardAlt, borderRadius: 3 }}>
+      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: w + '%',
+        background: c, borderRadius: 3, opacity: 0.88 }} />
+      <div title={'suggested ' + fmtDollar0(suggested)}
+        style={{ position: 'absolute', left: t + '%', top: -3, bottom: -3, width: 2,
+          background: C.ink, borderRadius: 2 }} />
+    </div>
+  );
+}
+
+function AllocNums({ actual, suggested }) {
+  return (
+    <div style={{ textAlign: 'right', fontFamily: MONO, fontSize: 12.5, whiteSpace: 'nowrap' }}>
+      <b style={{ fontWeight: 600, color: C.ink }}>{fmtDollar0(actual)}</b>
+      <span style={{ color: C.ink3, marginLeft: 7 }}>{fmtDollar0(suggested)}</span>
+    </div>
+  );
+}
+
+/* The three that decide the shape of the book, within reach of the picture
+   they change. Same settings as the Settings tab — dragging one here is not a
+   preview, it re-sizes everything. */
+const ALLOC_DIALS = [
+  { key: 'k', word: 'certainty', set: 'k', min: 1, max: 8, step: 0.1, dp: 1,
+    hint: 'How fast size builds as conviction rises above your floor. Higher means only strong convictions get real size.' },
+  { key: 't', word: 'clock', set: 'timeExp', min: 0, max: 1, step: 0.05, dp: 2,
+    hint: 'How much a fast market is favoured. 0 ignores the clock; 1 pays full price for money that comes back soon.' },
+  { key: 'c', word: 'concentration', set: 'tilt', min: 1, max: 8, step: 0.1, dp: 1,
+    hint: 'How sharply a short book backs its best ideas. Only bites when the book wants more than the base holds.' },
+];
+
+function AllocDials({ settings, onSettings }) {
+  if (!onSettings) return null;
+  return (
+    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center',
+      padding: '12px 0 13px', borderBottom: '1px solid ' + C.border }}>
+      {ALLOC_DIALS.map((d) => {
+        const v = num(settings[d.set], d.min);
+        return (
+          <div key={d.key} title={d.hint}
+            style={{ flex: '1 1 170px', minWidth: 160, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ width: 14, flexShrink: 0, textAlign: 'center', fontSize: 14,
+              fontWeight: 700, color: C.ink2 }}>{d.key}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 9.5, letterSpacing: 0.5, textTransform: 'uppercase',
+                color: C.ink3, fontWeight: 700, lineHeight: 1 }}>{d.word}</div>
+              <input data-alloc-dial={d.set} type="range" min={d.min} max={d.max} step={d.step} value={v}
+                onChange={(e) => {
+                  const next = parseFloat(e.target.value);
+                  if (Number.isFinite(next)) onSettings(Object.assign({}, settings, { [d.set]: next }));
+                }}
+                style={{ width: '100%', accentColor: C.blue, marginTop: 3, height: 16 }} />
+            </div>
+            <span style={{ width: 34, flexShrink: 0, textAlign: 'right', fontFamily: MONO,
+              fontSize: 12.5, fontWeight: 600, color: C.ink }}>{v.toFixed(d.dp)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Straight to the market, same as the dashboard rows. */
+function AllocArrow({ trade }) {
+  const href = marketUrl(trade);
+  if (!href) return <span />;
+  return (
+    <a data-stop data-alloc-link href={href} target="_blank" rel="noopener noreferrer"
+      title="Open this market on Polymarket" onClick={(e) => e.stopPropagation()}
+      style={{ width: 24, height: 24, borderRadius: 6, display: 'grid', placeItems: 'center',
+        color: C.ink3, textDecoration: 'none', fontSize: 12, border: '1px solid transparent' }}
+      onMouseEnter={(e) => { e.currentTarget.style.color = C.blue;
+        e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = C.cardAlt; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = C.ink3;
+        e.currentTarget.style.borderColor = 'transparent'; e.currentTarget.style.background = 'none'; }}
+    >↗</a>
+  );
+}
+
+function AllocPen({ trade, onEdit }) {
+  if (!onEdit) return <span />;
+  return (
+    <button data-stop data-alloc-edit={trade.key} title="Open this market"
+      onClick={(e) => { e.stopPropagation(); onEdit(trade); }}
+      style={{ width: 24, height: 24, borderRadius: 6, display: 'grid', placeItems: 'center',
+        border: '1px solid transparent', background: 'none', color: C.ink3, cursor: 'pointer', padding: 0 }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.border;
+        e.currentTarget.style.background = C.cardAlt; e.currentTarget.style.color = C.ink; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'transparent';
+        e.currentTarget.style.background = 'none'; e.currentTarget.style.color = C.ink3; }}>
+      <PenIcon />
+    </button>
+  );
+}
+
+function AllocationBox({ trades, book, settings, onEdit, onEditProb, onSettings }) {
+  const [shut, setShut] = useState(false);
+  const [sort, setSort] = useState('held');
+  const [openIds, setOpenIds] = useState({});
+  const [ready, setReady] = useState(false);
+
+  /* Remembered, because a box that reopens shut every morning gets ignored. */
+  useEffect(() => {
+    let live = true;
+    Store.get(K_ALLOC, null).then((v) => {
+      if (!live || !v || typeof v !== 'object') { setReady(true); return; }
+      if (typeof v.shut === 'boolean') setShut(v.shut);
+      if (ALLOC_SORTS.some((o) => o.id === v.sort)) setSort(v.sort);
+      setReady(true);
+    }).catch(() => setReady(true));
+    return () => { live = false; };
+  }, []);
+  useEffect(() => { if (ready) Store.set(K_ALLOC, { shut, sort }); }, [ready, shut, sort]);
+
+  const groups = useMemo(() => allocationGroups(trades, book), [trades, book]);
+  const of = (ALLOC_SORTS.find((o) => o.id === sort) || ALLOC_SORTS[0]).of;
+  const rows = useMemo(() => groups.slice().sort((a, b) => of(b) - of(a)), [groups, of]);
+  /* One scale across groups and members alike, or a member's bar would mean
+     something different from the bar directly above it. */
+  const max = useMemo(() => groups.reduce((m, g) =>
+    Math.max(m, num(g.actual), num(g.suggested)), 0), [groups]);
+
+  if (!groups.length) return null;
+  const held = groups.reduce((a, g) => a + num(g.actual), 0);
+  const target = groups.reduce((a, g) => a + num(g.suggested), 0);
+  const off = groups.reduce((a, g) => a + g.members.filter((m) => !m.z.onTarget).length, 0);
+
+  /* The name column breathes on a wide screen and gives way on a narrow one;
+     the bars keep one left edge either way. */
+  const ROW = { display: 'grid',
+    gridTemplateColumns: '18px minmax(140px,290px) minmax(0,1fr) 68px 104px 24px 24px',
+    gap: 10, alignItems: 'center' };
+  const NAME = { minWidth: 0, fontSize: 13, color: C.ink2, whiteSpace: 'nowrap',
+    overflow: 'hidden', textOverflow: 'ellipsis' };
+
+  return (
+    <Card pad={0}>
+      <div data-alloc-head onClick={() => setShut(!shut)} style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '13px 16px', cursor: 'pointer',
+        borderBottom: shut ? 'none' : '1px solid ' + C.border,
+      }}>
+        <span style={{ color: C.ink3, fontSize: 10, fontFamily: MONO,
+          transform: shut ? 'rotate(-90deg)' : 'none', transition: 'transform .15s' }}>▼</span>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: C.ink, letterSpacing: 0.2 }}>Allocation</span>
+        <span style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 12, color: C.ink3 }}>
+          {off} off target · {fmtDollar0(held)} of {fmtDollar0(target)}
+        </span>
+      </div>
+
+      {!shut && (
+        <div style={{ padding: '0 16px 16px' }}>
+          <AllocDials settings={settings} onSettings={onSettings} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap',
+            margin: '13px 0 14px' }}>
+            <span style={{ fontSize: 10.5, letterSpacing: 0.7, textTransform: 'uppercase',
+              color: C.ink3, fontWeight: 700, marginRight: 2 }}>Sort</span>
+            {ALLOC_SORTS.map((o) => (
+              <button key={o.id} data-alloc-sort={o.id} onClick={() => setSort(o.id)} style={{
+                border: '1px solid ' + (sort === o.id ? '#C3CFFF' : C.border),
+                background: sort === o.id ? '#EEF2FF' : C.card,
+                color: sort === o.id ? C.blue : C.ink3,
+                fontWeight: sort === o.id ? 700 : 500,
+                borderRadius: 999, padding: '5px 12px', fontSize: 12.5, cursor: 'pointer',
+              }}>{o.label}</button>
+            ))}
+          </div>
+
+          {rows.map((g) => {
+            const multi = g.members.length > 1;
+            const isOpen = !!openIds[g.id];
+            const ms = g.members.slice().sort((a, b) => of(b.z) - of(a.z));
+            return (
+              <div key={g.id}>
+                <div data-alloc-group={g.id}
+                  onClick={(e) => {
+                    if (e.target.closest('[data-stop]')) return;
+                    if (multi) setOpenIds(Object.assign({}, openIds, { [g.id]: !isOpen }));
+                    else if (onEdit) onEdit(g.members[0].trade);
+                  }}
+                  style={Object.assign({}, ROW, { padding: '9px 0', cursor: 'pointer' })}>
+                  <span style={{ textAlign: 'center', fontSize: 9, color: C.ink3, fontFamily: MONO,
+                    transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>
+                    {multi ? '▶' : ''}
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <AllocIcon trade={g.lead} size={32} />
+                    <span style={Object.assign({}, NAME, { fontWeight: 600, color: C.ink })}
+                      title={g.label}>{g.label}</span>
+                    {multi && (
+                      <span style={{ flexShrink: 0, fontFamily: MONO, fontSize: 10, fontWeight: 700,
+                        color: g.manual ? C.blue : C.ink3,
+                        background: g.manual ? C.blue + '12' : C.cardAlt,
+                        border: '1px solid ' + (g.manual ? C.blue + '33' : C.border),
+                        borderRadius: 4, padding: '0 5px', lineHeight: '16px' }}>
+                        {g.members.length}
+                      </span>
+                    )}
+                  </div>
+                  <AllocBar actual={g.actual} suggested={g.suggested} max={max} height={18} settings={settings} />
+                  {/* A group holds markets with different convictions, so it shows the
+                      spread and cannot be edited. Open it and each one carries its own. */}
+                  <div data-stop={multi ? '' : undefined}
+                    style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {multi ? (
+                      <span title="Each market in this group has its own conviction"
+                        style={{ fontFamily: MONO, fontSize: 11.5, color: C.ink3 }}>
+                        {g.convLo === g.convHi ? g.convLo + '%' : g.convLo + '–' + g.convHi + '%'}
+                      </span>
+                    ) : (
+                      <InlineNumber value={g.members[0].trade.myProbability}
+                        onSave={(v) => onEditProb && onEditProb(g.members[0].trade.key, v)} />
+                    )}
+                  </div>
+                  <AllocNums actual={g.actual} suggested={g.suggested} />
+                  {multi ? <span /> : <AllocArrow trade={g.members[0].trade} />}
+                  {multi ? <span /> : <AllocPen trade={g.members[0].trade} onEdit={onEdit} />}
+                </div>
+
+                {multi && isOpen && (
+                  <div style={{ position: 'relative', margin: '0 0 6px' }}>
+                    <div style={{ position: 'absolute', left: 8, top: 2, bottom: 2, width: 2,
+                      background: '#EDEFF3', borderRadius: 2 }} />
+                    {ms.map((m) => (
+                      <div key={m.trade.key} data-alloc-member={m.trade.key}
+                        style={Object.assign({}, ROW, { padding: '7px 0' })}>
+                        <span />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0,
+                          paddingLeft: 22 }}>
+                          <AllocIcon trade={m.trade} size={26} />
+                          <span style={Object.assign({}, NAME, { fontSize: 12.5 })}
+                            title={m.trade.title}>{m.sub}</span>
+                        </div>
+                        <AllocBar actual={m.z.actual} suggested={m.z.suggested} max={max} height={14} settings={settings} />
+                        <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          <InlineNumber value={m.trade.myProbability}
+                            onSave={(v) => onEditProb && onEditProb(m.trade.key, v)} />
+                        </div>
+                        <AllocNums actual={m.z.actual} suggested={m.z.suggested} />
+                        <AllocArrow trade={m.trade} />
+                        <AllocPen trade={m.trade} onEdit={onEdit} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center',
+            fontSize: 11.5, color: C.ink3, marginTop: 13, paddingTop: 11,
+            borderTop: '1px solid ' + C.border }}>
+            <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 2,
+              background: C.red, verticalAlign: -1, marginRight: 5 }} />more than suggested</span>
+            <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 2,
+              background: C.green, verticalAlign: -1, marginRight: 5 }} />less than suggested</span>
+            <span><span style={{ display: 'inline-block', width: 2, height: 11,
+              background: C.ink, verticalAlign: -2, marginRight: 6 }} />the black notch is the target</span>
+            <span style={{ marginLeft: 'auto' }}>tap a conviction to change it · ↗ opens the market</span>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -5330,6 +5682,7 @@ function App() {
             onOpenSettings={() => setTab('settings')}
             onEdit={setEditTrade} onEditProb={editProb} onDelete={deleteTrade}
             onSort={(id, flip) => persistSettings({ ...settings, openSort: id, openSortFlip: flip })}
+            onSettings={persistSettings}
           />
         )}
         {tab === 'settings' && <SettingsTab settings={settings} onChange={persistSettings} trades={trades} walletValue={walletValue} />}
